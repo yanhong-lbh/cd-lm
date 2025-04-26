@@ -1,4 +1,26 @@
+# Chunk-Distilled Language Modeling
 
+This repository contains the code and resources for our paper, which has been accepted to ICLR 2025.
+
+**Cite as**:  
+```
+@inproceedings{
+li2025chunkdistilled,
+title={Chunk-Distilled Language Modeling},
+author={Yanhong Li and Karen Livescu and Jiawei Zhou},
+booktitle={The Thirteenth International Conference on Learning Representations},
+year={2025},
+url={https://openreview.net/forum?id=nrvoWOWcyg}
+}
+```
+
+More codes are coming; we will release them before **April 31, 2025**.
+
+---
+
+# Method Overview Figure
+
+![Method overview diagram](assets/method_overview.pdf)
 
 # Pipeline Overview
 
