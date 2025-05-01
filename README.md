@@ -90,11 +90,6 @@ path/to/preprocessed_data/
    ```
 3. Update the CLI argument check in `preprocess_dataset.py` to call your function when `--dataset` matches your dataset name.
 
----
-Below is an updated **Section 2** of your README, reflecting that the token probabilities/hidden states extraction and memmap construction have now been combined into a single script. You can adjust the explanations/formatting as you wish.
-
----
-
 ## 2. Extracting Token Probabilities, Hidden States, and (Optionally) Building the Memmap
 
 ```bash
