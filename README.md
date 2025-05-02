@@ -98,8 +98,6 @@ python extract_token_probs_and_memmap.py \
     --data_dir path/to/preprocessed_data \
     --output_dir path/to/output \
     --save_hidden_states \
-    --dataset my_custom_dataset \
-    --model_name gpt2-xl-conversational \
     --partition train \
     --construct_memmap True \
     --cache_dir path/to/huggingface/cache
