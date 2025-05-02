@@ -108,8 +108,6 @@ python extract_token_probs_and_memmap.py \
 - **`--data_dir`**: Directory with `train.json`, `validation.json`, and/or `test.json` from the previous step.
 - **`--output_dir`**: Where to store output. Inside, you’ll see subdirectories for each data split (`train`, `validation`, `test`) with JSON files of token probabilities and (optionally) `.npy` hidden states.
 - **`--save_hidden_states`**: If set, saves the final hidden states for each chunk as `.npy`.
-- **`--dataset`**: A label for your dataset (used in file naming during memmap construction).
-- **`--model_name`**: A short name for your model (e.g. `gpt2`, `gpt2-xl`, `llama-2-7b-chat`). Used to determine the hidden-dimension size and final memmap file naming.
 - **`--partition`**: Which data split to process (`train`, `validation`, `test`). If you want to process all three, simply run the script multiple times or adjust accordingly.
 - **`--construct_memmap`**: If `True`, after extracting hidden states the script automatically assembles them into a large memory-mapped `.dat` file (and also an `.h5` dataset).
 - **`--cache_dir`**: (Optional) Path for caching/downloading model weights.  
