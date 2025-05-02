@@ -12,9 +12,6 @@ from pathlib import Path
 import h5py
 from concurrent.futures import ThreadPoolExecutor
 
-# --------------------------------------------------------------------------------
-# Helpers for step 1 (Extraction) - from original extract_chunks.py
-# --------------------------------------------------------------------------------
 
 def load_texts(json_file):
     """
@@ -105,9 +102,6 @@ def calculate_token_probabilities(tokens, model, tokenizer, chunk_id, save_hidde
 
     return token_prob_pairs, None
 
-# --------------------------------------------------------------------------------
-# Helpers for step 2 (Construct Memmap) - from original construct_memmapped_matrix.py
-# --------------------------------------------------------------------------------
 
 def get_model_dim(model_name):
     """
@@ -170,10 +164,6 @@ def construct_memmap(args):
     all_npy_files = sorted(list(file_dir.glob('hidden_states_*.npy')), 
                            key=lambda x: int(x.stem.split('_')[2]))
     total_file_len_npy = len(all_npy_files)
-
-    # If you had special logic for certain dataset + partition combos, place it here
-    # For example, if config.dataset == 'pile-of-law-federal_register' and config.partition == 'test', etc.
-    # We'll skip that custom logic for now unless you need to replicate it exactly.
 
     # 3. Convert all .npy -> .dat
     # This is multi-threaded. You can adjust max_workers.
@@ -277,10 +267,6 @@ def construct_memmap(args):
 
     print(f"[Done] Memmap and h5 built at: {filename} and {h5_file_path}.")
 
-# --------------------------------------------------------------------------------
-# Main pipeline
-# --------------------------------------------------------------------------------
-
 def main():
     parser = argparse.ArgumentParser()
     # Arguments needed from original extract_chunks.py
@@ -311,9 +297,7 @@ def main():
                         help="Minimum passage length (tokens) to consider.")
     args = parser.parse_args()
 
-    # 1. Load the model and tokenizer
-    # Because the original code references utils.load_model_and_tokenizer,
-    # you can adapt or just inline your load code here:
+
     from transformers import AutoTokenizer, AutoModelForCausalLM
 
     print(f"Loading tokenizer/model from {args.model_path} (cache_dir={args.cache_dir}) ...")
@@ -322,9 +306,7 @@ def main():
     model.eval()
     model.to("cuda" if torch.cuda.is_available() else "cpu")
 
-    # 2. For each split: train, validation, test (or limit to your chosen partition)
-    # If you only want a single partition, remove the for-loop and just do the single one.
-    splits = [args.partition]  # You can add others if you want to process all: ["train", "validation", "test"]
+    splits = [args.partition] 
 
     for split in splits:
         split_file = os.path.join(args.data_dir, f"{split}.json")
@@ -332,7 +314,6 @@ def main():
             print(f"WARNING: {split_file} not found. Skipping {split} split.")
             continue
 
-        # 2.1 Load text passages
         passages = load_texts(split_file)
         print(f"Loaded {len(passages)} passages for {split} split.")
 

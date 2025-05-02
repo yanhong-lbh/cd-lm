@@ -64,7 +64,7 @@ def preprocess_dockerfile(cache_dir, output_dir):
     # Suppose you have your Dockerfile dataset locally or from HF
     # This example logic is intentionally minimal, adapt as needed.
     # e.g., load from a local JSON or from huggingface
-    example_file_path = os.path.join(cache_dir, "code_datasets/gpt2-xl_code_Dockerfile_train.json")
+    example_file_path = os.path.join(cache_dir, "cache/Dockerfile_train_passages.json")
     with open(example_file_path, "r", encoding="utf-8") as f:
         data = json.load(f)
     
@@ -100,12 +100,8 @@ def preprocess_med_instruction(cache_dir, output_dir):
     val_data = raw_datasets["train"]["Conversation"][-5000:]
     test_data = raw_datasets["test"]["Conversation"]
     
-    # Convert them to your desired format
     train_passages = []
     for conv in train_data:
-        # Original logic:
-        # instruction, q_and_a = conv.split('[|Human|]')
-        # But you can keep it simpler and store raw text
         train_passages.append(conv.strip())
 
     val_passages = [conv.strip() for conv in val_data]
