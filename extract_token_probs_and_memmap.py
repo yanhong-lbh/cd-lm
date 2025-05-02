@@ -133,7 +133,7 @@ def convert_npy_to_dat(file_dir, start_idx, end_idx, model_path, offset=0):
 
         hs_npy = np.load(npy_file)
         # For LLaMA-based or Mistral-based models, the shape might need a squeeze
-        if 'llama' in model_path.lower() or 'mistral'in model_path.lower()::
+        if 'llama' in model_path.lower() or 'mistral'in model_path.lower():
             hs_npy = hs_npy.squeeze()
         hs_dat_file = file_dir / 'temp_dat' / f'{k}_l{hs_npy.shape[0]}.dat'
 
