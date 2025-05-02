@@ -11,6 +11,7 @@ from tqdm import tqdm
 from pathlib import Path
 import h5py
 from concurrent.futures import ThreadPoolExecutor
+from transformers import AutoConfig
 
 
 def load_texts(json_file):
@@ -103,24 +104,23 @@ def calculate_token_probabilities(tokens, model, tokenizer, chunk_id, save_hidde
     return token_prob_pairs, None
 
 
-def get_model_dim(model_name):
+def get_model_dim(model_path):
     """
-    Infer the hidden state dimension from known model_name patterns.
-    Adjust or expand as needed.
-    """
-    if model_name in ['gpt2-xl-conversational', 'gpt2-xl']:
-        return 1600
-    elif model_name in ['gpt2-large-conversational']:
-        return 1280
-    elif model_name in ['gpt2', 'gpt2_ft']:
-        return 768
-    elif model_name in ['llama-2-7b-chat', 'mistral-7b-instruct-v0.2']:
-        return 4096
-    else:
-        # Default fallback if you want
-        return 768
+    Tries to infer the hidden/embedding dimension from the config of the
+    Hugging Face model at model_path.
 
-def convert_npy_to_dat(file_dir, start_idx, end_idx, model_name, offset=0):
+    We try several attribute names commonly used by different model configs.
+    """
+    config = AutoConfig.from_pretrained(model_path)
+    possible_attrs = ["hidden_size", "n_embd", "d_model"]
+    for attr in possible_attrs:
+        if hasattr(config, attr):
+            return getattr(config, attr)
+
+    raise ValueError(f"Could not determine hidden state dimension from config at {model_path}.")
+
+
+def convert_npy_to_dat(file_dir, start_idx, end_idx, model_path, offset=0):
     """
     Convert .npy hidden states into .dat memmap. 
     offset can be used if you have special indexing (like skipping).
@@ -133,7 +133,7 @@ def convert_npy_to_dat(file_dir, start_idx, end_idx, model_name, offset=0):
 
         hs_npy = np.load(npy_file)
         # For LLaMA-based or Mistral-based models, the shape might need a squeeze
-        if model_name in ['llama-2-7b-chat', 'mistral-7b-instruct-v0.2']:
+        if 'llama' in model_path.lower() or 'mistral'in model_path.lower()::
             hs_npy = hs_npy.squeeze()
         hs_dat_file = file_dir / 'temp_dat' / f'{k}_l{hs_npy.shape[0]}.dat'
 
@@ -169,7 +169,7 @@ def construct_memmap(args):
     # This is multi-threaded. You can adjust max_workers.
     with ThreadPoolExecutor(max_workers=16) as executor:
         # We pass range(0, total_file_len_npy) to convert
-        executor.map(lambda k: convert_npy_to_dat(file_dir, k, k+1, args.model_name, offset=0),
+        executor.map(lambda k: convert_npy_to_dat(file_dir, k, k+1, args.model_path, offset=0),
                      range(total_file_len_npy))
 
     # 4. Verify the number of .dat matches .npy
@@ -198,7 +198,7 @@ def construct_memmap(args):
 
     # 7. Combine all .dat in chunks of 500
     total_file_len = total_file_len_npy
-    model_dim = get_model_dim(args.model_name)
+    model_dim = get_model_dim(args.model_path)
     n_of_k = math.ceil(total_file_len / 500)
 
     for k in range(n_of_k):
@@ -280,11 +280,6 @@ def main():
                         help="Whether to compute and save hidden states for each chunk.")
     parser.add_argument("--cache_dir", type=str, default=None,
                         help="Directory for caching model weights.")
-    # Additional arguments from construct_memmapped_matrix.py (config)
-    parser.add_argument("--dataset", type=str, default="default_dataset",
-                        help="Name of the dataset (used to identify final memmap files).")
-    parser.add_argument("--model_name", type=str, default="gpt2",
-                        help="Model name, e.g. gpt2, gpt2-xl, llama-2-7b-chat, etc.")
     parser.add_argument("--partition", type=str, default="train",
                         help="Which split to process: train/validation/test")
     parser.add_argument("--construct_memmap", type=bool, default=False,
