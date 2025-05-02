@@ -14,7 +14,6 @@ def process_token_with_hdf5(token_id,
                             idx_to_seqlen,
                             index_to_acc_index,
                             all_hidden_states_path,
-                            dataset_name,
                             partition,
                             model_gen,
                             model_ds):
@@ -69,7 +68,6 @@ def parallel_processing(token_ids,
                         idx_to_seqlen,
                         index_to_acc_index,
                         all_hidden_states_path,
-                        dataset_name,
                         partition,
                         model_gen,
                         model_ds,
@@ -84,7 +82,6 @@ def parallel_processing(token_ids,
                 idx_to_seqlen,
                 index_to_acc_index,
                 all_hidden_states_path,
-                dataset_name,
                 partition,
                 model_gen,
                 model_ds
@@ -99,8 +96,6 @@ def main():
     parser = argparse.ArgumentParser(description="Build and save a datastore (token trie) from extracted hidden states.")
     parser.add_argument("--save_dir", type=str, required=True,
                         help="Directory where the token trie data (tok_pos_*.json) is stored and *.h5 will be saved.")
-    parser.add_argument("--dataset_name", type=str, default="my_dataset",
-                        help="Name of the dataset (used for naming conventions).")
     parser.add_argument("--model_ds", type=str, default="gpt2",
                         help="Short label for the model from which token info was derived.")
     parser.add_argument("--model_gen", type=str, default="gpt2",
@@ -108,8 +103,6 @@ def main():
     parser.add_argument("--partition", type=str, default="train",
                         choices=["train", "validation", "test"],
                         help="Which dataset partition to process.")
-    parser.add_argument("--tok_prob_threshold", type=float, default=0.3,
-                        help="Used if referencing missing_tokens_{threshold}.json or naming.")
     parser.add_argument("--process_missing_tokens", action="store_true",
                         help="If set, process only the missing tokens from a file named `missing_tokens_{threshold}.json`.")
     parser.add_argument("--missing_tokens_file", type=str, default="",
@@ -187,7 +180,6 @@ def main():
         idx_to_seqlen,
         index_to_acc_index,
         all_hidden_states_path,
-        dataset_name=args.dataset_name,
         partition=args.partition,
         model_gen=args.model_gen,
         model_ds=args.model_ds,
