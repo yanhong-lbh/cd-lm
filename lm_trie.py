@@ -43,7 +43,6 @@ class LMWithTrie:
         tok_prob_threshold,
         model_ds,
         model_gen,
-        cache_dir,
         no_reprocessing=False,
         move_trie_to_gpu=False,
         exclude_huge_token_tries=False,
@@ -59,7 +58,6 @@ class LMWithTrie:
             tok_prob_threshold (float): Threshold used during trie creation.
             model_ds (str): Model used to build the datastore.
             model_gen (str): Model used for generation.
-            cache_dir (str): Directory for storing pickles and intermediate data.
             no_reprocessing (bool): If True, skip converting .h5 to .pkl for tries.
             move_trie_to_gpu (bool): If True, load all .pkl data to GPU up-front.
             exclude_huge_token_tries (bool): If True, skip retrieval for certain tokens.
@@ -73,7 +71,6 @@ class LMWithTrie:
         self.tok_prob_threshold = tok_prob_threshold
         self.model_ds = model_ds
         self.model_gen = model_gen
-        self.cache_dir = cache_dir
 
         self.no_reprocessing = no_reprocessing
         self.move_trie_to_gpu = move_trie_to_gpu
@@ -84,13 +81,13 @@ class LMWithTrie:
 
         # Directory where we store pre-flattened/pickled tries
         self.individual_flattened_dir = (
-            f"{self.cache_dir}/individual_flattened_{self.dataset}_{self.partition}_"
+            f"{self.token_trie_dir}/individual_flattened_{self.dataset}_{self.partition}_"
             f"{self.tok_prob_threshold}_DS{self.model_ds}_H{self.model_gen}"
         )
 
         # File for storing preloaded_tries in one big pickle
         self.pickle_file_individual = (
-            f"{self.cache_dir}/preloaded_individual_tries_{self.dataset}_{self.partition}_"
+            f"{self.token_trie_dir}/preloaded_individual_tries_{self.dataset}_{self.partition}_"
             f"{self.tok_prob_threshold}_DS{self.model_ds}_H{self.model_gen}.pkl"
         )
 

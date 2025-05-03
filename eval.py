@@ -203,7 +203,6 @@ def main():
         tok_prob_threshold=args.tok_prob_threshold,
         model_ds=args.model_ds,
         model_gen=args.model_gen,
-        cache_dir=args.cache_dir,
         no_reprocessing=args.no_reprocessing,
         move_trie_to_gpu=args.move_trie_to_gpu,
         exclude_huge_token_tries=args.exclude_huge_token_tries,
