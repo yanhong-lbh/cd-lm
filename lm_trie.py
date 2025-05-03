@@ -1,37 +1,21 @@
-import torch
-from transformers import (
-    GPT2Tokenizer, 
-    GPT2LMHeadModel, 
-    LogitsProcessorList, 
-    TemperatureLogitsWarper,
-    TopKLogitsWarper,
-    TopPLogitsWarper,
-    RepetitionPenaltyLogitsProcessor,
-    MinLengthLogitsProcessor
-)
-from datasets import load_dataset
-import re
-import pickle
 import os
-import json
-import h5py
-from tqdm import tqdm
-import numpy as np
 import glob
-
-from config import config
-import time
-
-import progressbar
+import json
+import pickle
+import numpy as np
+import h5py
+import torch
 import torch.nn.functional as F
-
-from utils import sizeof_fmt
-import sys
-
+import progressbar
 import threading
 
 class ThreadWithResult(threading.Thread):
-    def __init__(self, group=None, target=None, name=None, args=(), kwargs={}):
+    """
+    Simple extension of threading.Thread that allows returning results from the thread.
+    """
+    def __init__(self, group=None, target=None, name=None, args=(), kwargs=None):
+        if kwargs is None:
+            kwargs = {}
         super().__init__(group=group, target=target, name=name, args=args, kwargs=kwargs)
         self._return = None
 
@@ -42,704 +26,420 @@ class ThreadWithResult(threading.Thread):
     def result(self):
         return self._return
 
+
 class LMWithTrie:
-    def __init__(self, lm, tokenizer, config):
+    """
+    A wrapper around a language model that can optionally retrieve entire token chunks
+    from a prebuilt token-trie datastore using hidden-state similarity.
+    """
+
+    def __init__(
+        self,
+        lm,
+        tokenizer,
+        token_trie_dir,
+        dataset,
+        partition,
+        tok_prob_threshold,
+        model_ds,
+        model_gen,
+        cache_dir,
+        no_reprocessing=False,
+        move_trie_to_gpu=False,
+        exclude_huge_token_tries=False,
+        excluded_tries_prior=None
+    ):
+        """
+        Args:
+            lm (nn.Module): The loaded language model (with .model, .lm_head).
+            tokenizer (PreTrainedTokenizer): Corresponding tokenizer.
+            token_trie_dir (str): Directory containing token trie subfolders.
+            dataset (str): Dataset name (for naming consistency).
+            partition (str): "train", "validation", or "test".
+            tok_prob_threshold (float): Threshold used during trie creation.
+            model_ds (str): Model used to build the datastore.
+            model_gen (str): Model used for generation.
+            cache_dir (str): Directory for storing pickles and intermediate data.
+            no_reprocessing (bool): If True, skip converting .h5 to .pkl for tries.
+            move_trie_to_gpu (bool): If True, load all .pkl data to GPU up-front.
+            exclude_huge_token_tries (bool): If True, skip retrieval for certain tokens.
+            excluded_tries_prior (list): List of token IDs to skip if exclude_huge_token_tries is set.
+        """
         self.lm = lm
         self.tokenizer = tokenizer
-        self.config = config
-        self.individual_flattened_dir = f'{config.cache_dir}/individual_flattened_{config.dataset}_{config.partition}_{config.tok_prob_threshold}_DS{config.model_ds}_H{config.model_gen}'
-        pickle_file_trie = f'{config.cache_dir}/preloaded_tries_{config.dataset}_{config.partition}_{config.tok_prob_threshold}_DS{config.model_ds}_H{config.model_gen}.pkl'
-        pickle_file_flattened = f'{config.cache_dir}/preloaded_flattened_tries_{config.dataset}_{config.partition}_{config.tok_prob_threshold}_DS{config.model_ds}_H{config.model_gen}.pkl'
-        pickle_file_individual = f'{config.cache_dir}/preloaded_individual_tries_{config.dataset}_{config.partition}_{config.tok_prob_threshold}_DS{config.model_ds}_H{config.model_gen}.pkl'
-        self.preloaded_flattened_tries = {}
+        self.token_trie_dir = token_trie_dir
+        self.dataset = dataset
+        self.partition = partition
+        self.tok_prob_threshold = tok_prob_threshold
+        self.model_ds = model_ds
+        self.model_gen = model_gen
+        self.cache_dir = cache_dir
+
+        self.no_reprocessing = no_reprocessing
+        self.move_trie_to_gpu = move_trie_to_gpu
+        self.exclude_huge_token_tries = exclude_huge_token_tries
+        if excluded_tries_prior is None:
+            excluded_tries_prior = []
+        self.excluded_tries_prior = excluded_tries_prior
+
+        # Directory where we store pre-flattened/pickled tries
+        self.individual_flattened_dir = (
+            f"{self.cache_dir}/individual_flattened_{self.dataset}_{self.partition}_"
+            f"{self.tok_prob_threshold}_DS{self.model_ds}_H{self.model_gen}"
+        )
+
+        # File for storing preloaded_tries in one big pickle
+        self.pickle_file_individual = (
+            f"{self.cache_dir}/preloaded_individual_tries_{self.dataset}_{self.partition}_"
+            f"{self.tok_prob_threshold}_DS{self.model_ds}_H{self.model_gen}.pkl"
+        )
+
         self.preloaded_individual_tries = {}
 
-        if config.save_individual_tries_only:
-            if not config.no_reprocessing:
-                self.save_individual_tries()
-            
-            if config.move_trie_to_gpu:
-                if not os.path.exists(pickle_file_individual):
-                    self.preload_individual_tries()
-                    with open(pickle_file_individual, 'wb') as f:
-                        pickle.dump(self.preloaded_individual_tries, f)
-                else:
-                    with open(pickle_file_individual, 'rb') as f:
-                        self.preloaded_individual_tries = pickle.load(f)
-                        self.preloaded_individual_tries = {k: {'all_hidden_states': torch.tensor(v['all_hidden_states']).to('cuda:0'), 'all_node_values': v['all_node_values']} for k, v in self.preloaded_individual_tries.items()}
+        # Save/flatten .h5 -> .pkl if not skipping reprocessing
+        if not self.no_reprocessing:
+            self.save_individual_tries()
+
+        # Optionally preload entire set to GPU
+        if self.move_trie_to_gpu:
+            if not os.path.exists(self.pickle_file_individual):
+                # no big pickle -> read small pickles and create it
+                self.preload_individual_tries()
+                with open(self.pickle_file_individual, 'wb') as f:
+                    pickle.dump(self.preloaded_individual_tries, f)
+            else:
+                # load from the single big pickle
+                with open(self.pickle_file_individual, 'rb') as f:
+                    self.preloaded_individual_tries = pickle.load(f)
+
+                # move everything to GPU
+                for key, val in self.preloaded_individual_tries.items():
+                    val_tensor = torch.tensor(val['all_hidden_states']).to(self.lm.device)
+                    self.preloaded_individual_tries[key] = {
+                        'all_hidden_states': val_tensor,
+                        'all_node_values': val['all_node_values']
+                    }
 
     def save_individual_tries(self):
+        """
+        Convert each {token_id}.h5 file under token_trie_dir into a flattened .pkl
+        for easier on-the-fly retrieval. We skip reprocessing if it already exists.
+        """
+
         os.makedirs(self.individual_flattened_dir, exist_ok=True)
-        save_dir = f'{config.token_trie_dir}/token_trie_{config.dataset}_DS{config.model_ds}_H{config.model_gen}/{config.partition}_{config.tok_prob_threshold}'
 
-        trie_files = glob.glob(f'{save_dir}/*.h5')
+        # The subfolder containing h5 is usually named like:
+        # token_trie_{dataset}_DS{model_ds}_H{model_gen}/{partition}_{tok_prob_threshold}
+        # e.g.: token_trie_wikitext-103_DSgpt2_Hgpt2/train_0.3
+        trie_folder = f"token_trie_{self.dataset}_DS{self.model_ds}_H{self.model_gen}"
+        save_dir = os.path.join(self.token_trie_dir, trie_folder, f"{self.partition}_{self.tok_prob_threshold}")
 
+        trie_files = glob.glob(os.path.join(save_dir, "*.h5"))
         total_files = len(trie_files)
         processed_files = 0
 
         widgets = [
             progressbar.Percentage(),
             progressbar.Bar(marker='=', left='[', right=']'),
-            ' ', progressbar.SimpleProgress(),
-            ' ', progressbar.ETA()
+            ' ',
+            progressbar.SimpleProgress(),
+            ' ',
+            progressbar.ETA()
         ]
-
         bar = progressbar.ProgressBar(widgets=widgets, max_value=total_files)
 
         for file_path in trie_files:
+            # h5 files are named like "12345.h5"
+            file_name = os.path.basename(file_path)
+            token_str = file_name.split('.')[0]
+
+            pickle_file_trie = os.path.join(self.individual_flattened_dir, f"{token_str}.pkl")
+            if os.path.exists(pickle_file_trie):
+                # skip if already processed
+                processed_files += 1
+                bar.update(processed_files)
+                continue
+
+            json_file_path = os.path.join(save_dir, f"{token_str}.json")
+            if not os.path.exists(json_file_path):
+                # The matching .json with node values might be missing
+                processed_files += 1
+                bar.update(processed_files)
+                continue
+
             all_hidden_states = None
             all_node_values = []
-            token = int(os.path.basename(file_path).split('.')[0])
-            pickle_file_trie = os.path.join(self.individual_flattened_dir, f"{token}.pkl")
 
-            if os.path.exists(pickle_file_trie):
-                print(f"skip {token}")
-                continue
-            preloaded_trie = {}
+            # Load data
+            with h5py.File(file_path, 'r') as hf:
+                sorted_depths = sorted(hf['hidden_states'].keys(), reverse=True)
 
-            json_file_path = f'{save_dir}/{token}.json'
+                with open(json_file_path, 'r') as jfp:
+                    depth_to_node_values = json.load(jfp)
 
-            with h5py.File(file_path, 'r') as f:
-                sorted_depths = sorted(f['hidden_states'].keys(), reverse=True)
-                with open(json_file_path) as json_file:
-                    depth_to_node_values = json.load(json_file)
                 for depth in sorted_depths:
-                    arr = f[f'hidden_states/{depth}'][()]
+                    arr = hf[f'hidden_states/{depth}'][()]
                     vals = depth_to_node_values[depth]
-
-                    if config.model_ds == 'gpt2-xl-conversational':
-                        indices = []
-                        for i in range(len(vals)):
-                            if re.search(r'\n\d', vals[i]) or '[PAD]' in vals[i] or '<|endoftext|>' in vals[i]:
-                                
-                                if '[PAD]' in vals[i] or '<|endoftext|>' in vals[i]:
-                                    vals[i].index('<|endoftext|>')
-                                indices.append(i)
-                        
-                        if len(indices) != 0:
-                            new_arr = np.reshape(arr, (-1, 1600))
-                            filtered_vals = [j for i, j in enumerate(vals) if i not in indices]
-                            if len(filtered_vals) == 0:
-                                continue
-                            filtered_arr = np.delete(new_arr, indices, axis=0)
-                            arr = filtered_arr[:]
-                            vals = filtered_vals
 
                     if all_hidden_states is None:
                         all_hidden_states = arr[:]
                     else:
                         all_hidden_states = np.append(all_hidden_states, arr, axis=0)
-                        
-                    if config.model_ds in ['llama-2-7b-chat', 'mistral-7b-instruct-v0.2']:
 
-                        name = config.model_ds.split('-')[0]
-                        json_file_path = f'{save_dir}/{token}_{name}.json'
-                        with open(json_file_path) as json_file:
-                            depth_to_node_values = json.load(json_file)
+                    all_node_values += vals
 
-                            if config.dataset == 'MTbench' or config.dataset.endswith('80'):
-
-                                vals = self.tokenizer.batch_decode(depth_to_node_values[depth])
-
-                                for i in range(len(vals)):
-
-                                    m = re.search(r'(\d.)|(\n\d)|(\d\d.)', vals[i])
-                                    if m:
-                                        new_val = self.tokenizer.encode(vals[i][:m.start(0)])[1:]
-                                        depth_to_node_values[depth][i] = new_val
-
-                                decoded = self.tokenizer.batch_decode(depth_to_node_values[depth])
-
-                            all_node_values += depth_to_node_values[depth]
-
-                    else:
-                        all_node_values += vals
-
+            # If no data found, skip
             if all_hidden_states is None:
+                processed_files += 1
+                bar.update(processed_files)
                 continue
 
             preloaded_trie = {
                 'all_hidden_states': all_hidden_states,
                 'all_node_values': all_node_values
             }
-            
-            with open(pickle_file_trie, 'wb') as f:
-                pickle.dump(preloaded_trie, f)
+
+            with open(pickle_file_trie, 'wb') as pf:
+                pickle.dump(preloaded_trie, pf)
 
             processed_files += 1
             bar.update(processed_files)
 
         bar.finish()
-
-        return None
 
     def preload_individual_tries(self):
+        """
+        Read each per-token .pkl in `individual_flattened_dir` into memory,
+        storing them in `self.preloaded_individual_tries`.
+        """
+        files = glob.glob(os.path.join(self.individual_flattened_dir, "*.pkl"))
 
-        files = glob.glob(f"{self.individual_flattened_dir}/*.pkl")
-        for f in files:
-            token = f.split('/')[-1].split('.')[0]
-            with open(f, 'rb') as f:
-                preloaded_trie = pickle.load(f)
-                self.preloaded_individual_tries[token] = preloaded_trie
+        for fpath in files:
+            token_str = os.path.basename(fpath).split('.')[0]
+            with open(fpath, 'rb') as pf:
+                preloaded_trie = pickle.load(pf)
+                self.preloaded_individual_tries[token_str] = preloaded_trie
 
-    def preload_flattened_tries(self, partition, tok_prob_threshold):
+    def get_loaded_trie(self, token_id):
+        """
+        Retrieve (in CPU memory or GPU memory) the preloaded trie data for a token_id.
+        If not in self.preloaded_individual_tries (GPU mode), load from disk.
+        Returns None if no data is found.
+        """
+        token_str = str(token_id)
 
-        save_dir = f'{config.token_trie_dir}/token_trie_{config.dataset}_DS{config.model_ds}_H{config.model_gen}/{partition}_{tok_prob_threshold}'
-        os.makedirs(save_dir, exist_ok=True)
+        # If we have preloaded everything to GPU:
+        if self.move_trie_to_gpu:
+            return self.preloaded_individual_tries.get(token_str, None)
 
-        trie_files = glob.glob(f'{save_dir}/*.h5')
+        # Otherwise read from the per-token pickle on disk
+        pickle_path = os.path.join(self.individual_flattened_dir, f"{token_str}.pkl")
+        if not os.path.exists(pickle_path):
+            return None
 
-        total_files = len(trie_files)
-        processed_files = 0
+        with open(pickle_path, 'rb') as pf:
+            return pickle.load(pf)
 
-        widgets = [
-            progressbar.Percentage(),
-            progressbar.Bar(marker='=', left='[', right=']'),
-            ' ', progressbar.SimpleProgress(),
-            ' ', progressbar.ETA()
-        ]
-
-        bar = progressbar.ProgressBar(widgets=widgets, max_value=total_files)
-
-        preloaded_tries = {}
-        for file_path in trie_files:
-            all_hidden_states = None
-            all_node_values = []
-            try:
-                token = int(os.path.basename(file_path).split('.')[0])
-
-                with h5py.File(file_path, 'r') as f:
-                    sorted_depths = sorted(f['hidden_states'].keys(), reverse=True)
-
-                    for depth in sorted_depths:
-                        if all_hidden_states is None:
-                            all_hidden_states = f[f'hidden_states/{depth}'][()]
-                        else:
-                            all_hidden_states = np.append(all_hidden_states, f[f'hidden_states/{depth}'][()], axis=0)
-
-                json_file_path = f'{save_dir}/{token}.json'
-                with open(json_file_path) as json_file:
-                    depth_to_node_values = json.load(json_file)
-                    for depth in sorted_depths:
-                        all_node_values += depth_to_node_values[depth]
-
-                preloaded_tries[token] = {
-                    'all_hidden_states': all_hidden_states,
-                    'all_node_values': all_node_values
-                }
-
-            except Exception:
-                print(f"Corrupt file encountered: {file_path}")
-                continue
-
-            processed_files += 1
-            bar.update(processed_files)
-
-        bar.finish()
-
-        return preloaded_tries
-
-    def preload_tries(self, partition, tok_prob_threshold):
-        save_dir = f'{config.token_trie_dir}/token_trie_{config.dataset}_DS{config.model_ds}_H{config.model_gen}/{partition}_{tok_prob_threshold}'
-        os.makedirs(save_dir, exist_ok=True)
-        trie_files = glob.glob(f'{save_dir}/*.h5')
-
-        total_files = len(trie_files)
-        processed_files = 0
-
-        widgets = [
-            progressbar.Percentage(),
-            progressbar.Bar(marker='=', left='[', right=']'),
-            ' ', progressbar.SimpleProgress(),
-            ' ', progressbar.ETA()
-        ]
-
-        bar = progressbar.ProgressBar(widgets=widgets, max_value=total_files)
-
-        preloaded_tries = {}
-        for file_path in trie_files:
-            try:
-                token = int(os.path.basename(file_path).split('.')[0])
-
-                with h5py.File(file_path, 'r') as f:
-                    depth_to_hidden_states = {int(k): f[f'hidden_states/{k}'][()] for k in f['hidden_states'].keys()}
-
-                json_file_path = f'{save_dir}/{token}.json'
-                with open(json_file_path) as json_file:
-                    depth_to_node_values = json.load(json_file)
-
-                preloaded_tries[token] = {
-                    'depth_to_hidden_states': depth_to_hidden_states,
-                    'depth_to_node_values': depth_to_node_values,
-                    'sorted_depths': sorted(depth_to_hidden_states.keys(), reverse=True)
-                }
-
-            except Exception:
-                print(f"Corrupt file encountered: {file_path}")
-                continue
-
-            processed_files += 1
-            bar.update(processed_files)
-
-        bar.finish()
-
-        return preloaded_tries
-
-    def get_loaded_trie(self, curr_tok_key):
-
-        loaded_trie = None
-
-        if config.move_trie_to_gpu:
-            if str(curr_tok_key) in self.preloaded_individual_tries.keys():
-                loaded_trie = self.preloaded_individual_tries[f"{curr_tok_key}"]
-        else:
-            individual_flattened_path = os.path.join(self.individual_flattened_dir, f"{curr_tok_key}.pkl")
-        
-            if curr_tok_key in self.preloaded_flattened_tries or os.path.exists(individual_flattened_path):
-
-                if config.flatten_trie:
-                    loaded_trie = self.preloaded_flattened_tries[curr_tok_key]
-                elif config.save_individual_tries_only:
-                    with open(individual_flattened_path, 'rb') as f: 
-                        loaded_trie = pickle.load(f)
-        return loaded_trie if loaded_trie is not None else None
-
-    def generate(self, input_text, max_length, similarity_threshold=0.5, past_key_values=None):
-        input_tokens = input_text
-
-        input_ids = torch.tensor(input_tokens).unsqueeze(0).to(self.lm.device)
-
+    def generate(self, input_tokens, max_length, similarity_threshold=0.5, past_key_values=None):
+        """
+        Generates text step-by-step, retrieving from the trie if similarity >= threshold;
+        otherwise backs off to normal LM sampling for one token.
+        If similarity_threshold == 1 => do purely naive LM generation (no retrieval).
+        """
+        device = self.lm.device
+        input_ids = torch.tensor(input_tokens, dtype=torch.long).unsqueeze(0).to(device)
+        output = input_ids
         found_phrase_tokens_list = []
 
-        output = input_ids
-
+        # If threshold=1 => pure baseline generation
         if similarity_threshold == 1:
-
-            if config.resample_baseline:
-                if self.config.model_gen in ['gpt2-xl-conversational']:
-                    output = self.lm.generate(input_ids, do_sample=True, temperature=0.3, top_p=0.7, top_k=23, repetition_penalty=1.176, max_length=max_length, pad_token_id=self.tokenizer.pad_token_id, eos_token_id=self.tokenizer.eos_token_id, use_cache=True)
-                else:
-                    output = self.lm.generate(input_ids, do_sample=True, max_length=max_length)
-
-                return output
-
-            if self.config.model_gen in ['gpt2-xl-conversational']:
-                logits_processor = LogitsProcessorList([
-                    # MinLengthLogitsProcessor(max_length, pad_token_id=self.tokenizer.pad_token_id, eos_token_id=self.tokenizer.eos_token_id),
-                    RepetitionPenaltyLogitsProcessor(1.176),
-                ])
-                logits_warper = LogitsProcessorList([
-                    TopKLogitsWarper(23),
-                    TemperatureLogitsWarper(0.3),
-                    TopPLogitsWarper(0.7),
-                ])
-
-                while output.shape[-1] < max_length:
-                    input_ids = output
-                    hidden_states = self.lm.transformer(input_ids)[0][:,-1,:].detach()
-                    lm_logits = self.lm.lm_head(hidden_states)
-                    next_token_scores = logits_processor(input_ids, lm_logits)
-                    next_token_scores = logits_warper(input_ids, next_token_scores)
-                    probs = torch.nn.functional.softmax(next_token_scores, dim=-1)
-                    lm_result = torch.multinomial(probs, num_samples=1)
-                    output = torch.cat((input_ids, lm_result), dim=1)
-
-            elif self.config.model_gen in ['llama-2-7b-chat', 'mistral-7b-instruct-v0.2']:
-
-                while output.shape[-1] < max_length:
-                    input_ids = output
-                    hidden_states = self.lm.model(input_ids)[0][:,-1,:].detach()
-                    lm_logits = self.lm.lm_head(hidden_states)
-                    probs = torch.nn.functional.softmax(lm_logits, dim=-1)
-                    lm_result = torch.multinomial(probs, num_samples=1)
-                    output = torch.cat((input_ids, lm_result), dim=1)
-
-            else:
-                while output.shape[-1] < (max_length + len(input_tokens)):
-                    lm_output = self.lm(input_ids, output_hidden_states=True, use_cache = True, past_key_values=past_key_values)
-                    input_hidden_state = lm_output.hidden_states[-1][:,-1,:]
-                    past_key_values = lm_output.past_key_values
-                    logits = lm_output.logits
-                    next_token = logits[:, -1:].argmax(dim=-1)
-
-                    output = torch.cat((output, next_token), dim=1)
-                    input_ids = next_token  # update input_tokens with the generated token
-                
+            while output.shape[-1] < max_length:
+                hidden_states = self.lm.model(output)[0][:, -1, :].detach()
+                lm_logits = self.lm.lm_head(hidden_states)
+                probs = F.softmax(lm_logits, dim=-1)
+                next_token = torch.multinomial(probs, num_samples=1)
+                output = torch.cat((output, next_token), dim=1)
             return output
 
-        if self.config.model_gen in ['gpt2-xl-conversational', 'gpt2-xl', 'llama-2-7b-chat', 'mistral-7b-instruct-v0.2', 'gpt2-large-conversational']: 
-            max_length = max_length - len(input_tokens)
+        # Otherwise do retrieval-based generation
+        while output.shape[-1] < max_length:
+            input_hidden_state = self.lm.model(output)[0][:, -1, :]
+            current_token = output[0, -1].item()
 
-        matrix_mul_time = 0
-        argmax_time = 0
+            loaded_trie = self.get_loaded_trie(current_token)
+            found_retrieval = False
 
-        while output.shape[-1] < (max_length + len(input_tokens)):
+            if loaded_trie is not None:
+                all_hidden_states = loaded_trie['all_hidden_states']
+                all_node_values = loaded_trie['all_node_values']
 
-            found_node = False
-            nearest_neighbor = None
+                state_matrix = torch.tensor(all_hidden_states, device=device)
 
-            if self.config.model_gen in ['gpt2-xl-conversational', 'gpt2-large-conversational']:
-                lm_output = self.lm(input_ids)
-                input_hidden_state = lm_output.hidden_states[-1][:,-1,:]
-            elif self.config.model_gen in ['llama-2-7b-chat', 'mistral-7b-instruct-v0.2']:
-                input_hidden_state = self.lm.model(input_ids)[0][:,-1,:]
-            elif self.config.model_gen in ['gpt2-xl']:
-                lm_output = self.lm(input_ids, output_hidden_states=True)
-                input_hidden_state = lm_output.hidden_states[-1][:,-1,:]
-            else:
-                lm_output = self.lm(input_ids, output_hidden_states=True, use_cache=True, past_key_values=past_key_values)
-                input_hidden_state = lm_output.hidden_states[-1][:,-1,:]
-                past_key_values = lm_output.past_key_values
-
-            current_token = input_ids[0][-1]
-            curr_tok_key = int(current_token)
-
-            if config.save_individual_tries_only:
-
-                loaded_trie = self.get_loaded_trie(curr_tok_key)
-
-                if loaded_trie is not None:
-                    found_node = True
-                    all_hidden_states = loaded_trie['all_hidden_states']
-                    all_node_values = loaded_trie['all_node_values']
-
-                    state_matrix = torch.tensor(all_hidden_states)
-
-                    if config.move_trie_to_gpu:
-                        s_time = time.time()
+                try:
+                    similarities = F.cosine_similarity(input_hidden_state, state_matrix, dim=1)
+                except (torch.cuda.OutOfMemoryError, RuntimeError) as e:
+                    if ("out of memory" in str(e).lower()):
+                        # fallback to CPU
+                        input_hidden_state = input_hidden_state.to('cpu')
+                        state_matrix = state_matrix.to('cpu')
                         similarities = F.cosine_similarity(input_hidden_state, state_matrix, dim=1)
-                        e_time = time.time()
-                        matrix_mul_time += e_time - s_time
                     else:
-                        try:
-                            state_matrix = state_matrix.to(input_ids.device)
-                        except RuntimeError as e:
-                            # check if the error is caused by memory issues
-                            if "CUDA out of memory" in str(e):
-                                print("Memory error occurred, leaving state_matrix on CPU.")
-                            else:
-                                # if the error is not due to memory issues, raise the exception
-                                raise e
+                        raise e
 
-                        try:
-                            similarities = F.cosine_similarity(input_hidden_state, state_matrix, dim=1)
-                        except torch.cuda.OutOfMemoryError:
-                            print("Memory error occurred, doing matrix multiplication on CPU.")
-                            input_hidden_state = input_hidden_state.to('cpu')
-                            state_matrix = state_matrix.to('cpu')
-                            similarities = F.cosine_similarity(input_hidden_state, state_matrix, dim=1)
-                        except RuntimeError as e:
-                            # check if the error is caused by memory issues
-                            if "CUDA out of memory" in str(e):
-                                print("Memory error occurred, doing matrix multiplication on CPU.")
-                                input_hidden_state = input_hidden_state.to('cpu')
-                                state_matrix = state_matrix.to('cpu')
-                                similarities = F.cosine_similarity(input_hidden_state, state_matrix, dim=1)
-                            else:
-                                # if the error is not due to memory issues, raise the exception
-                                raise e
+                max_index = torch.argmax(similarities)
+                max_similarity = similarities[max_index]
 
-                    del state_matrix
+                if max_similarity >= similarity_threshold:
+                    nearest_neighbor = all_node_values[max_index]
+                    found_retrieval = True
 
-                    start = time.time()
+                    if self.model_ds in ['llama-2-7b-chat', 'mistral-7b-instruct-v0.2']:
+                        # We treat nearest_neighbor as token list
+                        chunk_tokens = nearest_neighbor[1:]
+                    else:
+                        # We treat nearest_neighbor as a string, then re-tokenize
+                        chunk_tokens = self.tokenizer.encode(nearest_neighbor)[1:]
 
-                    max_index = torch.argmax(similarities)
-                    max_similarity = torch.max(similarities)
+                    if len(chunk_tokens) > 0:
+                        found_phrase_tokens_list.append(chunk_tokens)
+                        chunk_tokens_tensor = torch.tensor(chunk_tokens, dtype=torch.long).unsqueeze(0).to(device)
+                        output = torch.cat((output, chunk_tokens_tensor), dim=1)
+                    else:
+                        found_retrieval = False
 
-                    end = time.time()
-
-                    argmax_time += end - start
-
-                    del similarities
-
-                    if max_similarity >= similarity_threshold:
-                        nearest_neighbor = all_node_values[max_index]
-
-                        if config.model_ds in ['llama-2-7b-chat', 'mistral-7b-instruct-v0.2'] :
-                            found_phrase_tokens = nearest_neighbor[1:]
-                            print(found_phrase_tokens)
-                            print(self.tokenizer.decode(found_phrase_tokens))
-                        else:
-                            found_phrase_tokens = self.tokenizer.encode(nearest_neighbor)[1:]
-
-                        if len(found_phrase_tokens) > 0:
-                            found_phrase_tokens_list.append(found_phrase_tokens)
-                            found_phrase_tokens = torch.tensor(found_phrase_tokens).to(input_ids.device).unsqueeze(0)
-
-                            output = torch.cat((output, found_phrase_tokens), dim=1)  
-
-                            if self.config.model_gen in ['gpt2-xl-conversational', 'gpt2-large-conversational']:
-                                input_ids = output
-                                # lm_output = self.lm(input_ids)
-                                # input_hidden_state = lm_output.hidden_states[-1][:,-1,:]
-                                del lm_output
-                            elif config.model_gen in ['llama-2-7b-chat', 'mistral-7b-instruct-v0.2']:
-                                input_ids = output
-                                input_hidden_state = self.lm.model(input_ids)[0][:,-1,:]
-                            else:
-                                input_ids = found_phrase_tokens
-                                lm_output = self.lm(input_ids, output_hidden_states=True, use_cache=True, past_key_values=past_key_values)
-                                input_hidden_state = lm_output.hidden_states[-1][:,-1,:]
-                                past_key_values = lm_output.past_key_values
-                        else:
-                            nearest_neighbor = None
-
-            # back off to LM generation if token is not in the trie, or similarity score lower than similarity_threshold
-            if (not found_node) or (not nearest_neighbor):
-
-                if self.config.model_gen in ['gpt2-xl-conversational', 'gpt2-large-conversational']:
-                    output = self.lm.generate(input_ids, do_sample=True, temperature=0.3, top_p=0.7, top_k=23, repetition_penalty=1.176, max_new_tokens=1, pad_token_id=self.tokenizer.pad_token_id, eos_token_id=self.tokenizer.eos_token_id)
-                    #output = self.lm.generate(input_ids, do_sample=True, temperature=0.3, top_p=0.7, top_k=23, repetition_penalty=1.176, max_length=(len(input_ids[0])+1), pad_token_id=self.tokenizer.pad_token_id, eos_token_id=self.tokenizer.eos_token_id)
-                    input_ids = output
-                elif self.config.model_gen in ['llama-2-7b-chat', 'mistral-7b-instruct-v0.2']:
-                    output = self.lm.generate(input_ids, do_sample=True, max_new_tokens=1)
-                    input_ids = output
-                else:
-                    logits = lm_output.logits
-                    next_token = logits[:, -1:].argmax(dim=-1)
-
-                    output = torch.cat((output, next_token), dim=1)
-                    input_ids = next_token  # update input_tokens with the generated token
-
-        print("mul_time: ", matrix_mul_time)
-        print("argmax_time: ", argmax_time)
+            # If no retrieval done, do naive single-token generation
+            if not found_retrieval:
+                hidden_states = self.lm.model(output)[0][:, -1, :].detach()
+                lm_logits = self.lm.lm_head(hidden_states)
+                probs = F.softmax(lm_logits, dim=-1)
+                next_token = torch.multinomial(probs, num_samples=1)
+                output = torch.cat((output, next_token), dim=1)
 
         return output, found_phrase_tokens_list
 
-    def generate_parallel(self, input_text, max_length, similarity_threshold=0.5, past_key_values=None):
-        input_tokens = input_text
-        input_ids = torch.tensor(input_tokens).unsqueeze(0).to(self.lm.device)
-
+    def generate_parallel(self, input_tokens, max_length, similarity_threshold=0.5, past_key_values=None):
+        """
+        Similar to generate(), but uses a parallel thread for naive LM sampling
+        while we do trie lookup, then chooses which result to use.
+        """
+        device = self.lm.device
+        input_ids = torch.tensor(input_tokens, dtype=torch.long).unsqueeze(0).to(device)
+        output = input_ids
         found_phrase_tokens_list = []
 
-        output = input_ids
+        def run_lm(hidden_state):
+            lm_logits = self.lm.lm_head(hidden_state)
+            probs = F.softmax(lm_logits, dim=-1)
+            return torch.multinomial(probs, num_samples=1)
 
-        if self.config.model_gen in ['gpt2-xl-conversational', 'gpt2-xl', 'llama-2-7b-chat', 'mistral-7b-instruct-v0.2']: 
-            max_length = max_length - len(input_tokens)
+        def run_retrieval(hidden_state, token_id):
+            loaded_trie = self.get_loaded_trie(token_id)
+            if loaded_trie is None:
+                return None
+            all_hidden_states = loaded_trie['all_hidden_states']
+            all_node_values = loaded_trie['all_node_values']
 
-        matrix_mul_time = 0
-        argmax_time = 0
+            matrix = torch.tensor(all_hidden_states, device=device)
+            try:
+                sims = F.cosine_similarity(hidden_state, matrix, dim=1)
+            except (torch.cuda.OutOfMemoryError, RuntimeError) as e:
+                if "out of memory" in str(e).lower():
+                    hidden_state = hidden_state.to('cpu')
+                    matrix = matrix.to('cpu')
+                    sims = F.cosine_similarity(hidden_state, matrix, dim=1)
+                else:
+                    raise e
 
-        def run_lm(hidden_states, input_ids, logits_processor=None, logits_warper=None):
-            if self.config.model_gen == 'gpt2-xl-conversational':
+            max_index = torch.argmax(sims)
+            max_similarity = sims[max_index]
+            if max_similarity >= similarity_threshold:
+                nearest_neighbor = all_node_values[max_index]
+                chunk_tokens = self.tokenizer.encode(nearest_neighbor)[1:]
+                if len(chunk_tokens) > 0:
+                    found_phrase_tokens_list.append(chunk_tokens)
+                    return torch.tensor(chunk_tokens, dtype=torch.long, device=device).unsqueeze(0)
+            return None
 
-                lm_logits = self.lm.lm_head(hidden_states)
-                next_token_scores = logits_processor(input_ids, lm_logits)
-                next_token_scores = logits_warper(input_ids, next_token_scores)
-                probs = torch.nn.functional.softmax(next_token_scores, dim=-1)
-                output = torch.multinomial(probs, num_samples=1)
-            elif self.config.model_gen in ['llama-2-7b-chat', 'mistral-7b-instruct-v0.2']:
-                lm_logits = self.lm.lm_head(hidden_states)
-                probs = torch.nn.functional.softmax(lm_logits, dim=-1)
-                output = torch.multinomial(probs, num_samples=1)
-            
-            return output
+        while output.shape[-1] < max_length:
+            hidden_states = self.lm.model(output)[0][:, -1, :].detach()
 
-        def run_retrieval(input_hidden_state, curr_tok_key, timings):
-            start_time = time.time()
-
-            found_node = False
-            nearest_neighbor = None
-
-            if self.config.save_individual_tries_only:
-                # start = time.time()
-                loaded_trie = self.get_loaded_trie(curr_tok_key)
-                # timings['get_loaded_trie'] += time.time() - start
-
-                if loaded_trie is not None:
-                    found_node = True
-                    all_hidden_states = loaded_trie['all_hidden_states']
-                    all_node_values = loaded_trie['all_node_values']
-
-                    state_matrix = torch.tensor(all_hidden_states)
-
-                    if config.move_trie_to_gpu:
-                        # start = time.time()
-                        similarities = F.cosine_similarity(input_hidden_state, state_matrix, dim=1)
-                        # timings['cosine_similarity'] += time.time() - start
-
-                    # start = time.time()
-                    max_index = torch.argmax(similarities)
-                    max_similarity = torch.max(similarities)
-                    # timings['max_similarity'] += time.time() - start
-
-                    if max_similarity >= similarity_threshold:
-                        nearest_neighbor = all_node_values[max_index]
-
-                        if config.model_ds in ['llama-2-7b-chat', 'mistral-7b-instruct-v0.2'] :
-                            found_phrase_tokens = nearest_neighbor[1:]
-                        else:
-                            # start = time.time()
-                            found_phrase_tokens = self.tokenizer.encode(nearest_neighbor)[1:]
-                            # timings['tokenizer_encode'] += time.time() - start
-
-                        if len(found_phrase_tokens) > 0:
-                            found_phrase_tokens_list.append(found_phrase_tokens)
-                            # all LM computation are on the same device
-                            found_phrase_tokens = torch.tensor(found_phrase_tokens).to('cuda:1').unsqueeze(0)
-
-                            return found_phrase_tokens, timings
-                        
-                return None, timings
-
-        trie_time = 0
-
-        timings = {'input_hidden_state': 0, 'current_token_processing': 0, 'get_loaded_trie': 0, 'cosine_similarity': 0, 'max_similarity': 0, 'tokenizer_encode': 0, 'output_concat': 0}
-
-        if self.config.model_gen == 'gpt2-xl-conversational':
-            logits_processor = LogitsProcessorList([
-                RepetitionPenaltyLogitsProcessor(1.176),
-            ])
-
-            logits_warper = LogitsProcessorList([
-                TopKLogitsWarper(23),
-                TemperatureLogitsWarper(0.3),
-                TopPLogitsWarper(0.7),
-            ])
-        else:
-            logits_processor = None
-            logits_warper = None
-
-        while output.shape[-1] < (max_length + len(input_tokens)):
-            input_ids = output
-
-            if self.config.model_gen == 'gpt2-xl-conversational':
-                input_hidden_state = self.lm.transformer(input_ids)[0][:,-1,:].detach()
-            elif self.config.model_gen in ['llama-2-7b-chat', 'mistral-7b-instruct-v0.2']:
-                input_hidden_state = self.lm.model(input_ids)[0][:,-1,:].detach()
-
-            lm_thread = ThreadWithResult(target=run_lm, args=[input_hidden_state, input_ids, logits_processor, logits_warper])
+            # Launch LM generation in a thread
+            lm_thread = ThreadWithResult(target=run_lm, args=(hidden_states,))
             lm_thread.start()
 
-            current_token = input_ids[0][-1]
-            curr_tok_key = int(current_token)
+            # Meanwhile do retrieval
+            current_token = output[0, -1].item()
+            retrieved = run_retrieval(hidden_states, current_token)
 
-            trie_result, timings = run_retrieval(input_hidden_state.to('cuda:0'), curr_tok_key, timings)
-
+            # Wait for LM thread to complete
             lm_thread.join()
+            lm_token = lm_thread.result()
 
-            if trie_result is not None:
-                # start = time.time()
-                output = torch.cat((input_ids, trie_result), dim=1)
-                # timings['output_concat'] += time.time() - start
-                pass
+            if retrieved is not None:
+                # If retrieval succeeded, append chunk
+                output = torch.cat((output, retrieved), dim=1)
             else:
-                lm_result = lm_thread.result()
-                output = torch.cat((input_ids, lm_result), dim=1)
+                # Fallback: single LM token
+                output = torch.cat((output, lm_token), dim=1)
 
         return output, found_phrase_tokens_list
 
-
-    def save_retrieved_chunk(self, input_hidden_state, sentence, similarity_threshold=0.5):
-        # used for perplexity calculation
-
-        input_ids = sentence
-        all_input_hidden_state = input_hidden_state.to(self.lm.device)
-        input_len = all_input_hidden_state.shape[0]
+    def save_retrieved_chunk(self, input_hidden_states, sentence, similarity_threshold=0.5):
+        """
+        For each token in 'sentence', tries to retrieve a chunk from the trie if the
+        hidden state similarity >= threshold.  Returns a dict: {token_idx: (chunk, sim)}
+        or None if none was found. Useful for perplexity or other analysis.
+        """
+        device = self.lm.device
+        all_input_hidden_states = input_hidden_states.to(device)
+        input_len = all_input_hidden_states.shape[0]
 
         found_phrase_tokens_dict = {}
 
         for i in range(input_len):
-
             found_phrase_tokens_dict[i] = None
+            current_token = sentence[i]
 
-            nearest_neighbor = None
+            # Possibly skip if user wants to exclude large tries
+            if self.exclude_huge_token_tries and self.partition == 'train':
+                if current_token in self.excluded_tries_prior:
+                    continue
 
-            input_hidden_state = all_input_hidden_state[i].unsqueeze(0)
-            current_token = input_ids[i]
-            curr_tok_key = int(current_token)
+            # Try to load the relevant trie
+            loaded_trie = self.get_loaded_trie(current_token)
+            if loaded_trie is None:
+                continue
 
-            if config.save_individual_tries_only:
+            single_hidden_state = all_input_hidden_states[i].unsqueeze(0)
+            all_hidden_states = loaded_trie['all_hidden_states']
+            all_node_values = loaded_trie['all_node_values']
 
-                individual_flattened_path = os.path.join(self.individual_flattened_dir, f"{curr_tok_key}.pkl")
+            state_matrix = torch.tensor(all_hidden_states, dtype=torch.float32)
+            try:
+                state_matrix = state_matrix.to(device)
+            except RuntimeError as e:
+                if "out of memory" in str(e).lower():
+                    print("Memory error; leaving state_matrix on CPU.")
+                else:
+                    raise e
 
-                if curr_tok_key in self.preloaded_flattened_tries or os.path.exists(individual_flattened_path):
-                    if config.exclude_huge_token_tries and config.partition == 'train':
-                        # do not do retrieval if the token is in excluded token tries priors
-                        if curr_tok_key in config.excluded_tries_prior:
-                            continue
+            try:
+                sims = F.cosine_similarity(single_hidden_state, state_matrix, dim=1)
+            except (torch.cuda.OutOfMemoryError, RuntimeError) as e:
+                if "out of memory" in str(e).lower():
+                    print("OOM error; computing similarity on CPU.")
+                    single_hidden_state = single_hidden_state.to('cpu')
+                    state_matrix = state_matrix.to('cpu')
+                    sims = F.cosine_similarity(single_hidden_state, state_matrix, dim=1)
+                else:
+                    raise e
 
-                    with open(individual_flattened_path, 'rb') as f: 
-                        loaded_trie = pickle.load(f)
-
-                    all_hidden_states = loaded_trie['all_hidden_states']
-                    all_node_values = loaded_trie['all_node_values']
-
-                    state_matrix = torch.tensor(all_hidden_states)
-
-                    try:
-                        state_matrix = state_matrix.to(input_ids.device)
-                    except RuntimeError as e:
-                        # check if the error is caused by memory issues
-                        if "CUDA out of memory" in str(e):
-                            print("Memory error occurred, leaving state_matrix on CPU.")
-                        else:
-                            # if the error is not due to memory issues, raise the exception
-                            raise e
-
-                    if state_matrix.shape[0] != len(all_node_values):
-                        print(curr_tok_key)
-                        continue
-
-                    # similarities = F.cosine_similarity(input_hidden_state, state_matrix, dim=1)
-
-                    try:
-                        similarities = F.cosine_similarity(input_hidden_state, state_matrix, dim=1)
-                    except torch.cuda.OutOfMemoryError:
-                        print("Memory error occurred, doing matrix multiplication on CPU.")
-                        input_hidden_state = input_hidden_state.to('cpu')
-                        state_matrix = state_matrix.to('cpu')
-                        similarities = F.cosine_similarity(input_hidden_state, state_matrix, dim=1)
-                    except RuntimeError as e:
-                        # check if the error is caused by memory issues
-                        if "CUDA out of memory" in str(e):
-                            print("Memory error occurred, doing matrix multiplication on CPU.")
-                            input_hidden_state = input_hidden_state.to('cpu')
-                            state_matrix = state_matrix.to('cpu')
-                            similarities = F.cosine_similarity(input_hidden_state, state_matrix, dim=1)
-                        else:
-                            # if the error is not due to memory issues, raise the exception
-                            raise e
-
-                    max_index = torch.argmax(similarities)
-                    max_similarity = torch.max(similarities)
-
-                    if max_similarity >= similarity_threshold:
-                        nearest_neighbor = all_node_values[max_index]
-
-                        if config.model_ds in ['llama-2-7b-chat', 'mistral-7b-instruct-v0.2']:
-                            found_phrase_tokens = nearest_neighbor[1:]
-                        else:
-                            found_phrase_tokens = self.tokenizer.encode(nearest_neighbor)[1:]
-
-                        if len(found_phrase_tokens) > 0:
-                            found_phrase_tokens_dict[i] = (found_phrase_tokens, float(max_similarity.cpu().detach().numpy()))
-
-            else:
-                if curr_tok_key in self.preloaded_tries:
-                    loaded_trie = self.preloaded_tries[curr_tok_key]
-                    depth_to_hidden_states = loaded_trie['depth_to_hidden_states']
-                    depth_to_node_values = loaded_trie['depth_to_node_values']
-                    sorted_depths = loaded_trie['sorted_depths']
-
-                    for depth in sorted_depths:
-                        # Move depth_to_hidden_states[depth] to GPU
-                        state_matrix = torch.tensor(depth_to_hidden_states[depth]).to(input_ids.device)
-
-                        # Speed up similarity calculation with vectorized operations
-                        similarities = F.cosine_similarity(input_hidden_state, state_matrix, dim=1)
-
-                        max_index = torch.argmax(similarities)
-                        max_similarity = torch.max(similarities)
-
-                        if max_similarity >= similarity_threshold:
-                            nearest_neighbor = depth_to_node_values[str(depth)][max_index]
-
-                            found_phrase_tokens = self.tokenizer.encode(nearest_neighbor)[1:]
-
-                            if len(found_phrase_tokens) > 0:
-                                found_phrase_tokens_dict[i] = (found_phrase_tokens, float(max_similarity.cpu().detach().numpy()))
-                            
-                            break
+            max_index = torch.argmax(sims)
+            max_similarity = sims[max_index]
+            if max_similarity >= similarity_threshold:
+                nearest_neighbor = all_node_values[max_index]
+                found_phrase_tokens = self.tokenizer.encode(nearest_neighbor)[1:]
+                if len(found_phrase_tokens) > 0:
+                    found_phrase_tokens_dict[i] = (found_phrase_tokens, float(max_similarity.item()))
 
         return found_phrase_tokens_dict
