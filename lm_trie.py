@@ -342,8 +342,9 @@ class LMWithTrie:
             max_index = torch.argmax(sims)
             max_similarity = sims[max_index]
             if max_similarity >= similarity_threshold:
-                nearest_neighbor = all_node_values[max_index]
-                chunk_tokens = self.tokenizer.encode(nearest_neighbor)[1:]
+                nearest_neighbor = self.tokenizer.encode(all_node_values[max_index])
+                start_idx = nearest_neighbor.index(token_id)
+                chunk_tokens = nearest_neighbor[start_idx+1:]
                 if len(chunk_tokens) > 0:
                     found_phrase_tokens_list.append(chunk_tokens)
                     return torch.tensor(chunk_tokens, dtype=torch.long, device=device).unsqueeze(0)
