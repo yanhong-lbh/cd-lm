@@ -81,14 +81,12 @@ class LMWithTrie:
 
         # Directory where we store pre-flattened/pickled tries
         self.individual_flattened_dir = (
-            f"{self.token_trie_dir}/individual_flattened_{self.dataset}_{self.partition}_"
-            f"{self.tok_prob_threshold}_DS{self.model_ds}_H{self.model_gen}"
+            f"{self.token_trie_dir}/individual_flattened_tries"
         )
 
         # File for storing preloaded_tries in one big pickle
         self.pickle_file_individual = (
-            f"{self.token_trie_dir}/preloaded_individual_tries_{self.dataset}_{self.partition}_"
-            f"{self.tok_prob_threshold}_DS{self.model_ds}_H{self.model_gen}.pkl"
+            f"{self.token_trie_dir}/preloaded_individual_tries.pkl"
         )
 
         self.preloaded_individual_tries = {}
