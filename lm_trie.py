@@ -129,7 +129,7 @@ class LMWithTrie:
         trie_folder = f"token_trie_{self.dataset}_DS{self.model_ds}_H{self.model_gen}"
         save_dir = os.path.join(self.token_trie_dir, trie_folder, f"{self.partition}_{self.tok_prob_threshold}")
 
-        trie_files = glob.glob(os.path.join(save_dir, "*.h5"))
+        trie_files = glob.glob(os.path.join(self.token_trie_dir, "*.h5"))
         total_files = len(trie_files)
         processed_files = 0
 
@@ -155,7 +155,7 @@ class LMWithTrie:
                 bar.update(processed_files)
                 continue
 
-            json_file_path = os.path.join(save_dir, f"{token_str}.json")
+            json_file_path = os.path.join(self.token_trie_dir, f"{token_str}.json")
             if not os.path.exists(json_file_path):
                 # The matching .json with node values might be missing
                 processed_files += 1
