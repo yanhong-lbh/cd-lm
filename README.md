@@ -47,13 +47,79 @@ Reads your preprocessed `.json` data, runs a language model to get token probabi
 4. Stores them in HDF5-based sub-files (`{token_id}.h5`) in a specified directory, forming your final retrieval datastore.
 
 ## 5. Inference / Retrieval  
-**Script:** `cd-lm_generate.py`  
+**Script:** `eval.py`  
 Use your specialized inference script that references the constructed datastore to perform nearest-neighbor retrieval or any other token-trie-based tasks.  
 
 
 
 ---
 # Breakdown of Each Step
+
+
+## 1. Preprocessing Your Dataset
+
+Run the following command to preprocess the dataset:
+
+```
+python preprocess_dataset.py \
+    --dataset wikitext-103-v1 \
+    --cache_dir path/to/huggingface/cache \
+    --output_dir path/to/preprocessed_data
+```
+
+After this command completes, you should have the following directory structure:
+
+```
+path/to/preprocessed_data/
+  ├── train.json
+  ├── validation.json
+  └── test.json
+```
+
+### Supported Datasets
+
+* `wikitext-103-v1`
+* `Dockerfile`
+* `med_instruction`
+* `pile-of-law-federal_register`
+
+
+### Adding Your Own Dataset
+
+If you want to add your own dataset, follow these steps:
+
+1. **Implement a custom function** in `preprocess_dataset.py` that:
+
+   * Loads and splits your data into train, validation (optional), and test sets (optional).
+   * Saves them in the standard JSON format (shown below).
+2. **Save the data** in the following JSON structure:
+
+   ```json
+   [
+     {"text": "Example passage 1..."},
+     {"text": "Example passage 2..."}
+   ]
+   ```
+3. **Update the CLI argument check** in `preprocess_dataset.py` to call your custom function when `--dataset` matches the name of your new dataset.
+
+You may choose not to use `preprocess_dataset.py` at all, as long as your data is saved in the format below:
+
+```
+path/to/preprocessed_data/
+  ├── train.json
+  ├── validation.json
+  └── test.json
+```
+
+Each JSON file should look like this:
+
+```json
+[
+  {"text": "Example passage 1..."},
+  {"text": "Example passage 2..."}
+]
+```
+<!-- 
 
 ## 1. Preprocessing Your Dataset
 
@@ -80,7 +146,9 @@ path/to/preprocessed_data/
 
 ### Adding Your Own Dataset
 
-1. Implement a custom function in `preprocess_dataset.py` that loads and splits your data into train, validation, and test sets.
+Prepare your text corpus into the following format: 
+
+1. Implement a custom function in `preprocess_dataset.py` that loads and splits your data into train, validation (optional), and test sets (optional).
 2. Save them in the standard JSON format:
    ```json
    [
@@ -89,6 +157,21 @@ path/to/preprocessed_data/
    ]
    ```
 3. Update the CLI argument check in `preprocess_dataset.py` to call your function when `--dataset` matches your dataset name.
+
+You may choose not to use `preprocess_dataset.py`, as long as the your data is saved in this format:
+
+```
+path/to/preprocessed_data/
+  ├── train.json
+  ├── validation.json
+  └── test.json
+```
+   ```json
+   [
+     {"text": "Example passage 1..."},
+     {"text": "Example passage 2..."}
+   ]
+   ``` -->
 
 ## 2. Extracting Token Probabilities, Hidden States, and (Optionally) Building the Memmap
 
