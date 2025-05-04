@@ -267,37 +267,22 @@ def preprocess_data(args):
         probs_exists = os.path.exists(f"{lm_pred_probs_dir}/{i}.json")
 
         if not (hs_exists and probs_exists):
-            # forward pass
-            if args.model_gen.startswith('llama'):
-                # dimension handling for LLaMA (B, L)
-                input_text = input_text.unsqueeze(0)
-                output = model(input_text, output_hidden_states=True)
-                logits = output.logits.squeeze(0)
-                hidden_states = output.hidden_states[-1].squeeze(0)
-            else:
-                output = model(input_text, output_hidden_states=True)
-                logits = output.logits
-                hidden_states = output.hidden_states[-1]
+            input_text = input_text.unsqueeze(0)
+            output = model(input_text, output_hidden_states=True)
+            # TODO: for gpt2 family, no need to do `.squeeze(0)`
+            logits = output.logits.squeeze(0)
+            hidden_states = output.hidden_states[-1].squeeze(0)
 
             # compute probabilities
             lm_probs = F.softmax(logits, dim=-1)
             # We skip the first token. So the i-th token prob is lm_probs[i][input_text[i+1]]
-            # but for simplicity let's do the same as eval.py:
-            # "lm_pred_probs = [float(lm_probs[i][tok]) for i, tok in enumerate(input_text[1:])]"
-            if args.model_gen.startswith('llama'):
-                # input_text is shape (1, seq_len) => we squeezed to (seq_len,) for logits
-                # This means len(logits) is seq_len
-                # so we do input_text.squeeze(0)[1:]
-                raw_input_text = input_text.squeeze(0)
-            else:
-                raw_input_text = input_text
+            raw_input_text = input_text.squeeze(0)
 
             lm_pred_probs = []
             for idx, tok in enumerate(raw_input_text[1:]):
                 prob = float(lm_probs[idx, tok])
                 lm_pred_probs.append(prob)
 
-            # Save them
             with open(f"{lm_pred_probs_dir}/{i}.json", "w") as f:
                 json.dump(lm_pred_probs, f)
             save_values(hidden_states_dir, f"{i}.pt", hidden_states)
