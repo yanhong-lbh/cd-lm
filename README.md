@@ -324,7 +324,7 @@ This is our specialized inference script. It uses the constructed datastore to p
 python eval.py \
     --model_path gpt2 \
     --cache_dir /path/to/huggingface/cache \
-    --token_trie_dir /path/to/trie_info \
+    --token_trie_dir /path/to/trie_info/token_trie_wikitext-103_DSgpt2_Hgpt2/train_0.3 \
     --dataset wikitext-103 \
     --partition test \
     --tok_prob_threshold 0.3 \
@@ -362,8 +362,8 @@ If your `prompts.json` looks like:
 
 ```json
 [
-  "The quick brown fox",
-  "In 2025, one major discovery was that"
+  "Example prompt 1...",
+  "Example prompt 2..."
 ]
 ```
 
