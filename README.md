@@ -84,7 +84,6 @@ path/to/preprocessed_data/
 ### Supported Datasets
 
 * `wikitext-103-v1`
-* `Dockerfile`
 * `med_instruction`
 * `pile-of-law-federal_register`
 
