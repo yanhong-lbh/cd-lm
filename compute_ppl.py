@@ -86,14 +86,7 @@ def compute_seq_ppl(
 
     # Define q_func exactly as in your original code
     def q_func(s):
-        if q_func_name == 'greedy':
-            # In your snippet, you had a local similarity_threshold here
-            # but you also have one in the outer scope. 
-            # We'll leave the code as is for consistency.
-            local_threshold = 0.89
-            return (1 - 1e-12) if s > local_threshold else 0
-
-        elif q_func_name == "identity":
+        if q_func_name == "identity":
             return s if s < 1 else (1 - 1e-12)
 
         elif q_func_name.startswith("map"):
@@ -228,12 +221,8 @@ def preprocess_data(args):
     os.makedirs(gt_dir, exist_ok=True)
     os.makedirs(lm_pred_probs_dir, exist_ok=True)
 
-    # ------------------------------------------------------
-    # 2) Load model & tokenizer
-    # ------------------------------------------------------
-    # Adjust caching/paths as needed
     tokenizer, model = load_model_and_tokenizer(
-        model_path=args.model_path,  # Make sure you provide --model_path
+        model_path=args.model_path, 
         cache_dir=args.cache_dir
     )
     model.eval()
@@ -245,11 +234,7 @@ def preprocess_data(args):
     # you may need to pass "config" or replicate relevant parts as needed.
     lm_w_trie = LMWithTrie(model, tokenizer, args)
 
-    # ------------------------------------------------------
-    # 3) Load chunked data
-    # ------------------------------------------------------
-    # You should already have chunked .pt data from somewhere,
-    # or adapt this step to do the chunking:
+    # TODO: adapt this step to do the chunking
     if args.eval_set == "val":
         dataset_path = f"{args.dataset}_{args.model_gen}_validation_chunked_passages.pt"
     else:
@@ -339,11 +324,6 @@ def preprocess_data(args):
         if not os.path.exists(gt_path):
             # Save the raw tokens (the entire input_text) as ground truth
             save_values(gt_dir, f"{i}.pt", input_text)
-
-
-################################################################################
-# MAIN SCRIPT - COMBINES PREPROCESS + PPL COMPUTATION
-################################################################################
 
 def main():
     parser = argparse.ArgumentParser(description="Standalone compute_ppl with preprocessing.")
