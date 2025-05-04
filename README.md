@@ -310,3 +310,82 @@ python make_token_trie.py \
 - If you split your data into multiple runs, you can use the `--k` and `--k_interval` options to process only a subset of token IDs.
 
 Upon completion, each token (`token_id`) in the trie now has a dedicated HDF5 file containing its relevant embeddings/hidden states. This enables efficient nearest-neighbor lookups during the inference step.
+
+
+## 5. Inference / Retrieval
+
+**Script:** `eval.py`
+
+This is our specialized inference script. It uses the constructed datastore to perform nearest-neighbor retrieval for chunk-level next-token suggestions based on hidden-state similarity. If the similarity is below a threshold, it falls back to standard LM generation.
+
+### Basic Usage
+
+```bash
+python eval.py \
+    --model_path gpt2 \
+    --cache_dir /path/to/huggingface/cache \
+    --token_trie_dir /path/to/trie_info \
+    --dataset wikitext-103 \
+    --partition test \
+    --tok_prob_threshold 0.3 \
+    --model_ds gpt2 \
+    --model_gen gpt2 \
+    --prompt_file /path/to/prompts.json \
+    --save_dir /path/to/save/results \
+    --similarity_threshold 0.5 \
+    --max_new_tokens 50
+```
+
+**Key Arguments**:
+
+* `--model_path`: Hugging Face model path/identifier for the LM used in inference.
+* `--cache_dir`: Directory where models and pickled tries are cached.
+* `--token_trie_dir`: Root directory for token trie files from Step 3 & 4.
+* `--dataset` and `--partition`: Must match how the trie was built.
+* `--tok_prob_threshold`: Probability threshold used for building the trie.
+* `--model_ds`, `--model_gen`: The model used to build the datastore (`model_ds`) and the model used for generation (`model_gen`). Often the same, but can differ if you built a specialized datastore.
+* `--prompt_file`: JSON file with one or more prompts to feed into the model.
+* `--save_dir`: Output directory. For each prompt, the script saves a `.json` with the generated text and timing info.
+* `--similarity_threshold`: Cosine similarity threshold for deciding if we should retrieve a chunk from the datastore.
+* `--max_new_tokens`: Number of tokens to generate beyond the prompt length.
+
+By default, the script:
+
+1. Loads the language model and tokenizer.
+2. (Optionally) flattens any `.h5` trie files into `.pkl` for efficient retrieval (unless `--no_reprocessing` is set).
+3. For each prompt, attempts chunk-level retrieval. If the chunk retrieval is successful (similarity ≥ threshold), it appends an entire chunk at once. Otherwise, it defaults to single-token LM generation.
+4. Saves the resulting generation in `prompt_{i}.json` (one file per prompt).
+
+### Example Prompt File
+
+If your `prompts.json` looks like:
+
+```json
+[
+  "The quick brown fox",
+  "In 2025, one major discovery was that"
+]
+```
+
+Then `eval.py` generates completions for each prompt and writes them to:
+
+```
+path/to/save/results/
+  ├── prompt_0.json
+  └── prompt_1.json
+```
+
+Each `.json` file contains both the generation details and timing information.
+
+---
+
+### Baseline LM Generation Only
+
+If you want to compare with **pure** language model generation (no retrieval), add `--gen_baseline_only`. Internally, it sets `similarity_threshold=1`, effectively disabling retrieval.
+
+---
+
+## Questions / Issues
+
+Please open an issue on this GitHub repo for any troubleshooting or feature requests.
+
