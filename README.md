@@ -14,8 +14,6 @@ url={https://openreview.net/forum?id=nrvoWOWcyg}
 }
 ```
 
-More codes are coming; we will release them before **April 31, 2025**.
-
 ---
 
 # Method Overview Figure
