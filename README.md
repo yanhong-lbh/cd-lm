@@ -20,6 +20,22 @@ url={https://openreview.net/forum?id=nrvoWOWcyg}
 
 ![Method overview diagram](assets/method_overview.png)
 
+---
+
+# Environment Setup
+
+Before running any scripts, please set up the necessary environment.
+
+1.  **Activate your Conda environment.** We assume you have Conda installed and have created an environment.
+
+2.  **Install dependencies.** The required Python packages are listed in `requirements.txt`. Install them using pip:
+    ```bash
+    pip install -r requirements.txt
+    ```
+    > **Note on PyTorch & CUDA:** The `requirements.txt` file will install a default version of PyTorch. If you need a specific version compatible with your CUDA toolkit for GPU acceleration, we strongly recommend installing it separately by following the official instructions on the [PyTorch website](https://pytorch.org/get-started/locally/).
+
+---
+
 # Pipeline Overview
 
 ## 1. Preprocess Dataset  
